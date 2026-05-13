@@ -1,7 +1,17 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Loader2, UploadCloud, FileText, Link, X, AlertCircle } from "lucide-react";
+import {
+  Loader2,
+  UploadCloud,
+  Layers,
+  Link,
+  X,
+  AlertCircle,
+  CheckCircle2,
+  Clock,
+  XCircle,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,20 +24,12 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import type { Platform, VideoRecord } from "@/lib/types";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-type Tab = "upload" | "bulk" | "url";
+type Tab = "single" | "bulk" | "url";
 
 interface SharedFields {
   title: string;
@@ -37,68 +39,19 @@ interface SharedFields {
 
 type UploadPhase = "idle" | "uploading" | "analyzing";
 
-interface CsvRow {
+type BulkFileStatus = "queued" | "uploading" | "analyzing" | "complete" | "failed";
+
+interface BulkFile {
+  id: string;
+  file: File;
   title: string;
   handle: string;
-  platform: Platform;
-  video_url: string;
-  _rowIndex: number;
-  _parseError?: string;
+  platform: Platform | null;
+  status: BulkFileStatus;
+  error?: string;
 }
 
-// ─── CSV parser ───────────────────────────────────────────────────────────────
-// Simple comma-split parser. Values containing commas must be pre-processed
-// (no RFC 4180 quoted-field support). Falls back to shared fields for empty cells.
-
-const VALID_PLATFORMS = new Set<Platform>(["YouTube", "TikTok", "Instagram"]);
-
-function parseCsv(text: string, fallback: SharedFields): CsvRow[] {
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  if (lines.length < 2) return [];
-
-  const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
-  const col = (name: string) => header.indexOf(name);
-
-  const titleCol = col("title");
-  const handleCol = col("handle");
-  const platformCol = col("platform");
-  const urlCol = col("video_url");
-
-  if (urlCol === -1) {
-    return [
-      {
-        title: "",
-        handle: "",
-        platform: "YouTube",
-        video_url: "",
-        _rowIndex: 1,
-        _parseError: "CSV must have a 'video_url' column",
-      },
-    ];
-  }
-
-  return lines.slice(1).map((line, i) => {
-    const cols = line.split(",").map((c) => c.trim());
-    const rawTitle = titleCol !== -1 ? (cols[titleCol] ?? "") : "";
-    const rawHandle = handleCol !== -1 ? (cols[handleCol] ?? "") : "";
-    const rawPlatform = platformCol !== -1 ? (cols[platformCol] ?? "") : "";
-    const rawUrl = urlCol !== -1 ? (cols[urlCol] ?? "") : "";
-
-    const title = rawTitle || fallback.title;
-    const handle = rawHandle || fallback.handle;
-    const platform = VALID_PLATFORMS.has(rawPlatform as Platform)
-      ? (rawPlatform as Platform)
-      : (fallback.platform ?? "YouTube");
-
-    const _parseError = !rawUrl ? `Row ${i + 2}: video_url is empty` : undefined;
-
-    return { title, handle, platform, video_url: rawUrl, _rowIndex: i + 2, _parseError };
-  });
-}
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
@@ -126,12 +79,51 @@ function buildRecord(data: Record<string, unknown>, fields: SharedFields): Video
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
-  { id: "upload", label: "File Upload", icon: UploadCloud },
-  { id: "bulk", label: "Bulk Import", icon: FileText },
+  { id: "single", label: "Single Upload", icon: UploadCloud },
+  { id: "bulk", label: "Bulk Upload", icon: Layers },
   { id: "url", label: "Direct URL", icon: Link },
 ];
 
+const ALLOWED_TYPES = new Set([
+  "video/mp4",
+  "video/quicktime",
+  "video/x-msvideo",
+  "video/webm",
+]);
+const ACCEPT = ".mp4,.mov,.avi,.webm";
+const MAX_FILE_BYTES = 500 * 1024 * 1024;
+const MAX_BULK_FILES = 10;
+
 const SHARED_EMPTY: SharedFields = { title: "", handle: "", platform: null };
+
+// ─── Status badge ─────────────────────────────────────────────────────────────
+
+const STATUS_CONFIG: Record<
+  BulkFileStatus,
+  { label: string; className: string; icon: React.ElementType }
+> = {
+  queued:    { label: "Queued",    className: "bg-slate-100 text-slate-600",   icon: Clock },
+  uploading: { label: "Uploading", className: "bg-blue-50 text-blue-600",      icon: Loader2 },
+  analyzing: { label: "Analyzing", className: "bg-purple-50 text-purple-600",  icon: Loader2 },
+  complete:  { label: "Complete",  className: "bg-green-50 text-green-700",    icon: CheckCircle2 },
+  failed:    { label: "Failed",    className: "bg-red-50 text-red-600",        icon: XCircle },
+};
+
+function StatusBadge({ status }: { status: BulkFileStatus }) {
+  const { label, className, icon: Icon } = STATUS_CONFIG[status];
+  const spinning = status === "uploading" || status === "analyzing";
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium shrink-0",
+        className
+      )}
+    >
+      <Icon className={cn("h-3 w-3", spinning && "animate-spin")} />
+      {label}
+    </span>
+  );
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -142,27 +134,31 @@ interface Props {
 }
 
 export function AddVideoModal({ open, onClose, onSuccess }: Props) {
-  const [activeTab, setActiveTab] = useState<Tab>("upload");
+  const [activeTab, setActiveTab] = useState<Tab>("single");
   const [shared, setShared] = useState<SharedFields>(SHARED_EMPTY);
 
-  // File Upload tab
+  // Single Upload tab
   const [file, setFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Bulk Import tab
-  const [csvRows, setCsvRows] = useState<CsvRow[]>([]);
+  // Bulk Upload tab
+  const [bulkFiles, setBulkFiles] = useState<BulkFile[]>([]);
+  const [bulkDragOver, setBulkDragOver] = useState(false);
   const [bulkProcessing, setBulkProcessing] = useState(false);
-  const [bulkIndex, setBulkIndex] = useState(0);
+  const [bulkCompleted, setBulkCompleted] = useState(0);
+  const [bulkTotal, setBulkTotal] = useState(0);
+  const [applyHandle, setApplyHandle] = useState("");
+  const [applyPlatform, setApplyPlatform] = useState<Platform | null>(null);
+  const bulkFileInputRef = useRef<HTMLInputElement>(null);
 
   // Direct URL tab
   const [videoUrl, setVideoUrl] = useState("");
   const [urlLoading, setUrlLoading] = useState(false);
 
-  const isInFlight =
-    uploadPhase !== "idle" || bulkProcessing || urlLoading;
+  const isInFlight = uploadPhase !== "idle" || bulkProcessing || urlLoading;
 
   function resetAll() {
     setShared(SHARED_EMPTY);
@@ -170,9 +166,13 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
     setDragOver(false);
     setUploadPhase("idle");
     setUploadError(null);
-    setCsvRows([]);
+    setBulkFiles([]);
+    setBulkDragOver(false);
     setBulkProcessing(false);
-    setBulkIndex(0);
+    setBulkCompleted(0);
+    setBulkTotal(0);
+    setApplyHandle("");
+    setApplyPlatform(null);
     setVideoUrl("");
     setUrlLoading(false);
   }
@@ -187,10 +187,7 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
     setShared((prev) => ({ ...prev, [k]: v }));
   }
 
-  // ─── File Upload handlers ──────────────────────────────────────────────────
-
-  const MAX_FILE_BYTES = 500 * 1024 * 1024;
-  const ACCEPT = ".mp4,.mov,.avi,.webm";
+  // ─── Single Upload handlers ─────────────────────────────────────────────────
 
   function handleFileSelect(f: File) {
     setUploadError(null);
@@ -228,7 +225,7 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
       }
 
       if (!uploadData.publicUrl) {
-        console.error("[modal] Upload succeeded but publicUrl is missing in response:", uploadData);
+        console.error("[modal] Upload succeeded but publicUrl is missing:", uploadData);
         setUploadError("Upload succeeded but no public URL was returned. Check Supabase bucket is public.");
         setUploadPhase("idle");
         return;
@@ -242,7 +239,7 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
         body: JSON.stringify({ videoUrl: uploadData.publicUrl, ...shared }),
       });
       const analyzeData = await analyzeRes.json();
-      console.log("[modal] /api/analyze response:", { ok: analyzeRes.ok, status: analyzeRes.status, score: analyzeData.score, analyzeStatus: analyzeData.status, error: analyzeData.error });
+      console.log("[modal] /api/analyze response:", { ok: analyzeRes.ok, status: analyzeRes.status, score: analyzeData.score, error: analyzeData.error });
 
       if (!analyzeRes.ok) {
         setUploadError(analyzeData.error ?? "Analysis failed");
@@ -263,73 +260,134 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
     }
   }
 
-  // ─── Bulk Import handlers ──────────────────────────────────────────────────
+  // ─── Bulk Upload handlers ───────────────────────────────────────────────────
 
-  function handleCsvFile(f: File) {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      setCsvRows(parseCsv(text, shared));
-    };
-    reader.readAsText(f);
+  function addBulkFiles(incoming: FileList | File[]) {
+    const arr = Array.from(incoming).filter((f) => ALLOWED_TYPES.has(f.type));
+    setBulkFiles((prev) => {
+      const slots = MAX_BULK_FILES - prev.length;
+      if (slots <= 0) return prev;
+      const toAdd: BulkFile[] = arr.slice(0, slots).map((f) => ({
+        id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        file: f,
+        title: f.name.replace(/\.[^.]+$/, "").replace(/[_-]/g, " "),
+        handle: "",
+        platform: null,
+        status: "queued",
+      }));
+      return [...prev, ...toAdd];
+    });
+  }
+
+  function handleBulkDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setBulkDragOver(false);
+    addBulkFiles(e.dataTransfer.files);
+  }
+
+  function updateBulkFile(
+    id: string,
+    updates: Partial<Pick<BulkFile, "title" | "handle" | "platform">>
+  ) {
+    setBulkFiles((prev) => prev.map((f) => (f.id === id ? { ...f, ...updates } : f)));
+  }
+
+  function removeBulkFile(id: string) {
+    setBulkFiles((prev) => prev.filter((f) => f.id !== id));
+  }
+
+  function applyToAll() {
+    setBulkFiles((prev) =>
+      prev.map((f) =>
+        f.status === "queued"
+          ? {
+              ...f,
+              handle: applyHandle || f.handle,
+              platform: applyPlatform ?? f.platform,
+            }
+          : f
+      )
+    );
   }
 
   async function handleBulkSubmit() {
-    const validRows = csvRows.filter((r) => !r._parseError);
-    if (validRows.length === 0) return;
+    // Mark incomplete queued files as failed immediately so user gets feedback
+    setBulkFiles((prev) =>
+      prev.map((f) => {
+        if (f.status === "queued" && (!f.title.trim() || !f.handle.trim() || !f.platform)) {
+          return { ...f, status: "failed" as BulkFileStatus, error: "Fill in title, handle, and platform" };
+        }
+        return f;
+      })
+    );
+
+    const queue = bulkFiles.filter(
+      (f) => f.status === "queued" && f.title.trim() && f.handle.trim() && f.platform
+    );
+    if (queue.length === 0) return;
 
     setBulkProcessing(true);
-    setBulkIndex(0);
-    const errors: string[] = [];
+    setBulkCompleted(0);
+    setBulkTotal(queue.length);
 
-    for (let i = 0; i < validRows.length; i++) {
-      setBulkIndex(i);
-      const row = validRows[i];
+    let succeeded = 0;
+    let failed = 0;
+
+    for (const item of queue) {
+      const { id, file: f, title, handle, platform } = item;
       try {
-        const res = await fetch("/api/analyze", {
+        setBulkFiles((prev) =>
+          prev.map((r) => (r.id === id ? { ...r, status: "uploading" } : r))
+        );
+        const fd = new FormData();
+        fd.append("file", f);
+        const uploadRes = await fetch("/api/upload", { method: "POST", body: fd });
+        const uploadData = await uploadRes.json();
+        if (!uploadRes.ok || !uploadData.publicUrl) {
+          throw new Error(uploadData.error ?? "Upload failed");
+        }
+
+        setBulkFiles((prev) =>
+          prev.map((r) => (r.id === id ? { ...r, status: "analyzing" } : r))
+        );
+        const analyzeRes = await fetch("/api/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            videoUrl: row.video_url,
-            title: row.title,
-            handle: row.handle,
-            platform: row.platform,
-          }),
+          body: JSON.stringify({ videoUrl: uploadData.publicUrl, title, handle, platform }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? "Analysis failed");
-        onSuccess(
-          buildRecord(data, {
-            title: row.title,
-            handle: row.handle,
-            platform: row.platform,
-          })
+        const analyzeData = await analyzeRes.json();
+        if (!analyzeRes.ok) throw new Error(analyzeData.error ?? "Analysis failed");
+
+        setBulkFiles((prev) =>
+          prev.map((r) => (r.id === id ? { ...r, status: "complete" } : r))
         );
+        onSuccess(buildRecord(analyzeData, { title, handle, platform }));
+        succeeded++;
       } catch (err) {
-        errors.push(
-          `Row ${row._rowIndex} (${row.title || row.video_url}): ${err instanceof Error ? err.message : "failed"}`
+        const msg = err instanceof Error ? err.message : "Failed";
+        setBulkFiles((prev) =>
+          prev.map((r) => (r.id === id ? { ...r, status: "failed", error: msg } : r))
         );
+        failed++;
       }
+
+      setBulkCompleted((c) => c + 1);
     }
 
     setBulkProcessing(false);
-    const succeeded = validRows.length - errors.length;
 
-    if (errors.length === 0) {
+    if (failed === 0) {
       toast.success(`${succeeded} video${succeeded !== 1 ? "s" : ""} analyzed successfully`);
+      resetAll();
+      onClose();
     } else if (succeeded > 0) {
-      toast.warning(`${succeeded} succeeded, ${errors.length} failed`, {
-        description: errors[0],
-      });
+      toast.warning(`${succeeded} succeeded, ${failed} failed — review errors below`);
     } else {
-      toast.error("All submissions failed", { description: errors[0] });
+      toast.error("All submissions failed — review errors below");
     }
-
-    resetAll();
-    onClose();
   }
 
-  // ─── Direct URL handler ────────────────────────────────────────────────────
+  // ─── Direct URL handler ─────────────────────────────────────────────────────
 
   async function handleUrlSubmit() {
     if (!videoUrl.trim() || !shared.title || !shared.handle || !shared.platform) return;
@@ -358,29 +416,44 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
     }
   }
 
-  // ─── Submit button config ──────────────────────────────────────────────────
+  // ─── Submit button config ───────────────────────────────────────────────────
 
-  const uploadValid = file !== null && !uploadError && shared.title && shared.handle && shared.platform;
-  const validBulkRows = csvRows.filter((r) => !r._parseError);
-  const bulkValid = validBulkRows.length > 0;
-  const urlValid = videoUrl.trim() && shared.title && shared.handle && shared.platform;
+  const uploadValid =
+    file !== null && !uploadError && shared.title && shared.handle && shared.platform;
+  const urlValid =
+    videoUrl.trim() && shared.title && shared.handle && shared.platform;
+  const readyBulkFiles = bulkFiles.filter(
+    (f) => f.status === "queued" && f.title.trim() && f.handle.trim() && f.platform
+  );
 
   function submitButton() {
-    if (activeTab === "upload") {
+    if (activeTab === "single") {
       const label =
         uploadPhase === "uploading"
           ? "Uploading…"
           : uploadPhase === "analyzing"
             ? "Analyzing… (1–3 min)"
             : "Submit for Analysis";
-      return { disabled: !uploadValid || uploadPhase !== "idle", label, loading: uploadPhase !== "idle", onClick: handleUploadSubmit };
+      return {
+        disabled: !uploadValid || uploadPhase !== "idle",
+        label,
+        loading: uploadPhase !== "idle",
+        onClick: handleUploadSubmit,
+      };
     }
+
     if (activeTab === "bulk") {
       const label = bulkProcessing
-        ? `Analyzing ${bulkIndex + 1} of ${validBulkRows.length}…`
-        : `Import ${validBulkRows.length} video${validBulkRows.length !== 1 ? "s" : ""}`;
-      return { disabled: !bulkValid || bulkProcessing, label, loading: bulkProcessing, onClick: handleBulkSubmit };
+        ? `${Math.min(bulkCompleted + 1, bulkTotal)} of ${bulkTotal} complete`
+        : `Start Analysis${readyBulkFiles.length > 0 ? ` (${readyBulkFiles.length})` : ""}`;
+      return {
+        disabled: readyBulkFiles.length === 0 || bulkProcessing,
+        label,
+        loading: bulkProcessing,
+        onClick: handleBulkSubmit,
+      };
     }
+
     return {
       disabled: !urlValid || urlLoading,
       label: urlLoading ? "Analyzing… (1–3 min)" : "Submit for Analysis",
@@ -391,7 +464,7 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
 
   const btn = submitButton();
 
-  // ─── Shared fields (rendered on all tabs) ────────────────────────────────
+  // ─── Shared fields (single + url tabs only) ─────────────────────────────────
 
   const sharedDisabled = isInFlight;
 
@@ -439,9 +512,9 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
     </div>
   );
 
-  // ─── Tab panels ───────────────────────────────────────────────────────────
+  // ─── Single Upload panel ─────────────────────────────────────────────────────
 
-  const uploadPanel = (
+  const singlePanel = (
     <div className="space-y-3">
       <div
         onClick={() => !isInFlight && fileInputRef.current?.click()}
@@ -450,7 +523,9 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
         onDrop={handleDrop}
         className={cn(
           "flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed p-8 text-center transition-colors cursor-pointer",
-          dragOver ? "border-purple-400 bg-purple-50" : "border-slate-200 hover:border-slate-300 hover:bg-slate-50",
+          dragOver
+            ? "border-purple-400 bg-purple-50"
+            : "border-slate-200 hover:border-slate-300 hover:bg-slate-50",
           isInFlight && "pointer-events-none opacity-50"
         )}
       >
@@ -495,94 +570,199 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
         <p className="text-xs text-slate-500 text-center">Uploading to storage…</p>
       )}
       {uploadPhase === "analyzing" && (
-        <p className="text-xs text-slate-500 text-center">Analyzing with TwelveLabs Pegasus… (1–3 min)</p>
+        <p className="text-xs text-slate-500 text-center">
+          Analyzing with TwelveLabs Pegasus… (1–3 min)
+        </p>
       )}
     </div>
   );
 
+  // ─── Bulk Upload panel ───────────────────────────────────────────────────────
+
+  const slotsLeft = MAX_BULK_FILES - bulkFiles.length;
+
   const bulkPanel = (
     <div className="space-y-3">
-      <div>
-        <Label htmlFor="csv-file" className="mb-1.5 block">CSV File</Label>
-        <p className="text-xs text-slate-500 mb-2">
-          Required columns: <code className="bg-slate-100 px-1 rounded">title</code>,{" "}
-          <code className="bg-slate-100 px-1 rounded">handle</code>,{" "}
-          <code className="bg-slate-100 px-1 rounded">platform</code>,{" "}
-          <code className="bg-slate-100 px-1 rounded">video_url</code>.
-          Empty cells fall back to the fields below.
-        </p>
-        <input
-          id="csv-file"
-          type="file"
-          accept=".csv"
-          disabled={bulkProcessing}
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) handleCsvFile(f);
-          }}
-          className="block w-full text-sm text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border file:border-slate-200 file:text-xs file:font-medium file:text-slate-700 file:bg-white hover:file:bg-slate-50 disabled:opacity-50"
-        />
+      {/* Drop zone */}
+      <div
+        onClick={() =>
+          !bulkProcessing && slotsLeft > 0 && bulkFileInputRef.current?.click()
+        }
+        onDragOver={(e) => { e.preventDefault(); setBulkDragOver(true); }}
+        onDragLeave={() => setBulkDragOver(false)}
+        onDrop={handleBulkDrop}
+        className={cn(
+          "flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed p-6 text-center transition-colors",
+          slotsLeft > 0 && !bulkProcessing
+            ? "cursor-pointer hover:border-slate-300 hover:bg-slate-50"
+            : "cursor-not-allowed opacity-50",
+          bulkDragOver ? "border-purple-400 bg-purple-50" : "border-slate-200"
+        )}
+      >
+        <UploadCloud className="h-7 w-7 text-slate-400" />
+        <div>
+          <p className="text-sm font-medium text-slate-700">
+            Drag and drop video files here or{" "}
+            <span className="text-purple-600">click to browse</span>
+          </p>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Supports .mp4, .mov, .webm — up to {MAX_BULK_FILES} files at once
+            {bulkFiles.length > 0 &&
+              ` · ${slotsLeft} slot${slotsLeft !== 1 ? "s" : ""} remaining`}
+          </p>
+        </div>
       </div>
+      <input
+        ref={bulkFileInputRef}
+        type="file"
+        accept={ACCEPT}
+        multiple
+        className="hidden"
+        onChange={(e) => { if (e.target.files) addBulkFiles(e.target.files); }}
+      />
 
-      {csvRows.length > 0 && (
-        <div className="rounded-lg border border-slate-200 overflow-hidden">
-          <div className="max-h-[180px] overflow-y-auto">
-            <Table>
-              <TableHeader>
-                <TableRow className="bg-slate-50 hover:bg-slate-50">
-                  <TableHead className="text-xs py-2 pl-3">Title</TableHead>
-                  <TableHead className="text-xs py-2">Handle</TableHead>
-                  <TableHead className="text-xs py-2">Platform</TableHead>
-                  <TableHead className="text-xs py-2 pr-3 max-w-[140px]">URL</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {csvRows.map((row) => (
-                  <TableRow
-                    key={row._rowIndex}
-                    className={cn(
-                      "text-xs",
-                      row._parseError && "bg-red-50 text-red-700"
-                    )}
-                  >
-                    <TableCell className="py-1.5 pl-3 font-medium max-w-[100px] truncate">
-                      {row._parseError ? row._parseError : (row.title || "—")}
-                    </TableCell>
-                    {!row._parseError && (
-                      <>
-                        <TableCell className="py-1.5">{row.handle || "—"}</TableCell>
-                        <TableCell className="py-1.5">{row.platform}</TableCell>
-                        <TableCell className="py-1.5 pr-3 max-w-[140px] truncate text-slate-400">
-                          {row.video_url}
-                        </TableCell>
-                      </>
-                    )}
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+      {/* Apply to all row */}
+      {bulkFiles.some((f) => f.status === "queued") && (
+        <div className="flex items-end gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+          <div className="flex-1 space-y-1">
+            <Label className="text-xs text-slate-500">Handle — apply to all</Label>
+            <Input
+              placeholder="@beautybylaura"
+              value={applyHandle}
+              onChange={(e) => setApplyHandle(e.target.value)}
+              disabled={bulkProcessing}
+              className="h-7 text-xs"
+            />
           </div>
-          <div className="px-3 py-1.5 border-t border-slate-100 bg-slate-50 text-xs text-slate-500">
-            {validBulkRows.length} valid · {csvRows.length - validBulkRows.length} errors
+          <div className="w-32 space-y-1">
+            <Label className="text-xs text-slate-500">Platform — apply to all</Label>
+            <select
+              value={applyPlatform ?? ""}
+              onChange={(e) => setApplyPlatform((e.target.value as Platform) || null)}
+              disabled={bulkProcessing}
+              className="flex h-7 w-full rounded-lg border border-input bg-background px-2 py-0.5 text-xs text-foreground outline-none transition-colors focus:border-ring focus:ring-2 focus:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <option value="" disabled>Platform…</option>
+              <option value="YouTube">YouTube</option>
+              <option value="TikTok">TikTok</option>
+              <option value="Instagram">Instagram</option>
+            </select>
           </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs shrink-0"
+            disabled={bulkProcessing || (!applyHandle && !applyPlatform)}
+            onClick={applyToAll}
+          >
+            Apply to all
+          </Button>
         </div>
       )}
 
+      {/* File list */}
+      {bulkFiles.length > 0 && (
+        <div className="space-y-2 max-h-[280px] overflow-y-auto pr-0.5">
+          {bulkFiles.map((item) => (
+            <div
+              key={item.id}
+              className={cn(
+                "rounded-lg border px-3 py-2.5 space-y-2",
+                item.status === "failed"
+                  ? "border-red-200 bg-red-50"
+                  : item.status === "complete"
+                    ? "border-green-200 bg-green-50/40"
+                    : "border-slate-200 bg-white"
+              )}
+            >
+              {/* Top row: badge + filename + size + remove */}
+              <div className="flex items-center gap-2">
+                <StatusBadge status={item.status} />
+                <span className="truncate text-sm font-medium text-slate-700 flex-1">
+                  {item.file.name}
+                </span>
+                <span className="shrink-0 text-xs text-slate-400">
+                  {formatBytes(item.file.size)}
+                </span>
+                {item.status === "queued" && (
+                  <button
+                    onClick={() => removeBulkFile(item.id)}
+                    className="shrink-0 text-slate-400 hover:text-slate-600"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {/* Error */}
+              {item.status === "failed" && item.error && (
+                <p className="text-xs text-red-600">{item.error}</p>
+              )}
+
+              {/* Editable fields — queued only */}
+              {item.status === "queued" && (
+                <div className="grid grid-cols-[1fr_1fr_7rem] gap-2">
+                  <div className="space-y-1">
+                    <Label className="text-xs text-slate-400">Title</Label>
+                    <Input
+                      placeholder="Video title"
+                      value={item.title}
+                      onChange={(e) => updateBulkFile(item.id, { title: e.target.value })}
+                      className="h-7 text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs text-slate-400">Handle</Label>
+                    <Input
+                      placeholder="@handle"
+                      value={item.handle}
+                      onChange={(e) => updateBulkFile(item.id, { handle: e.target.value })}
+                      className="h-7 text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs text-slate-400">Platform</Label>
+                    <select
+                      value={item.platform ?? ""}
+                      onChange={(e) =>
+                        updateBulkFile(item.id, {
+                          platform: (e.target.value as Platform) || null,
+                        })
+                      }
+                      className="flex h-7 w-full rounded-lg border border-input bg-background px-2 py-0.5 text-xs text-foreground outline-none transition-colors focus:border-ring focus:ring-2 focus:ring-ring/50"
+                    >
+                      <option value="" disabled>Platform</option>
+                      <option value="YouTube">YouTube</option>
+                      <option value="TikTok">TikTok</option>
+                      <option value="Instagram">Instagram</option>
+                    </select>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Overall progress bar */}
       {bulkProcessing && (
         <div className="space-y-1.5">
-          <p className="text-xs text-slate-500">
-            Analyzing {bulkIndex + 1} of {validBulkRows.length}…
+          <p className="text-xs text-slate-500 text-center">
+            {bulkCompleted} of {bulkTotal} complete
           </p>
           <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
             <div
               className="h-full rounded-full bg-purple-600 transition-all duration-500"
-              style={{ width: `${Math.round(((bulkIndex + 1) / validBulkRows.length) * 100)}%` }}
+              style={{ width: `${Math.round((bulkCompleted / bulkTotal) * 100)}%` }}
             />
           </div>
         </div>
       )}
     </div>
   );
+
+  // ─── Direct URL panel ────────────────────────────────────────────────────────
 
   const urlPanel = (
     <div className="space-y-2">
@@ -609,7 +789,7 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
     </div>
   );
 
-  // ─── Render ───────────────────────────────────────────────────────────────
+  // ─── Render ──────────────────────────────────────────────────────────────────
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && handleClose()}>
@@ -617,8 +797,8 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
         <DialogHeader>
           <DialogTitle>Submit Video for Compliance Review</DialogTitle>
           <DialogDescription>
-            Upload a file, import from CSV, or paste a direct URL — we&apos;ll run an AI
-            compliance check using TwelveLabs Pegasus 1.5.
+            Upload a file, batch upload multiple videos, or paste a direct URL — we&apos;ll
+            run an AI compliance check using TwelveLabs Pegasus 1.5.
           </DialogDescription>
         </DialogHeader>
 
@@ -643,12 +823,12 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
           ))}
         </div>
 
-        {/* Shared fields */}
-        {sharedFields}
+        {/* Shared title/handle/platform — not shown on bulk tab (each row has its own) */}
+        {activeTab !== "bulk" && sharedFields}
 
-        {/* Tab-specific panel */}
+        {/* Tab panel */}
         <div className="pt-1">
-          {activeTab === "upload" && uploadPanel}
+          {activeTab === "single" && singlePanel}
           {activeTab === "bulk" && bulkPanel}
           {activeTab === "url" && urlPanel}
         </div>
