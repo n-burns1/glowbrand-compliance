@@ -23,22 +23,36 @@ function logError(label: string, err: unknown) {
 }
 
 export async function POST(req: Request) {
+  console.log("ANALYZE ROUTE HIT");
   console.log("\n[analyze] ── POST /api/analyze ────────────────────────────");
-  const body = await req.json();
-  const { videoUrl, handle, platform, title } = body;
-
-  console.log("[analyze] Request body:", { videoUrl, handle, platform, title });
-
-  if (!videoUrl || !handle || !platform || !title) {
-    const missing = ["videoUrl", "handle", "platform", "title"].filter((k) => !body[k]);
-    console.error(`[analyze] Missing required fields: ${missing.join(", ")}`);
-    return NextResponse.json(
-      { error: "All fields are required", missing },
-      { status: 400 }
-    );
-  }
 
   try {
+    // Parse body inside try/catch — if Content-Type is wrong or body is empty
+    // req.json() throws a SyntaxError which Next.js would otherwise return as
+    // plain text before our catch block could handle it.
+    let body: Record<string, unknown>;
+    try {
+      body = await req.json();
+    } catch (parseErr) {
+      console.error("[analyze] Failed to parse request body:", parseErr);
+      return NextResponse.json(
+        { error: "Invalid request body — expected JSON with videoUrl, title, handle, platform" },
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const { videoUrl, handle, platform, title } = body as Record<string, string>;
+    console.log("[analyze] Request body:", { videoUrl, handle, platform, title });
+
+    if (!videoUrl || !handle || !platform || !title) {
+      const missing = ["videoUrl", "handle", "platform", "title"].filter((k) => !body[k]);
+      console.error(`[analyze] Missing required fields: ${missing.join(", ")}`);
+      return NextResponse.json(
+        { error: "All fields are required", missing },
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
     console.log("[analyze] Step 1/4 — ensureIndex()");
     const indexId = await ensureIndex();
     console.log(`[analyze] Index ID: ${indexId}`);
@@ -59,12 +73,10 @@ export async function POST(req: Request) {
     );
 
     console.log("[analyze] ✅ Pipeline complete");
-    return NextResponse.json({
-      jobId: `job_${Date.now()}`,
-      score: report.score,
-      status: report.status,
-      report,
-    });
+    return NextResponse.json(
+      { jobId: `job_${Date.now()}`, score: report.score, status: report.status, report },
+      { headers: { "Content-Type": "application/json" } }
+    );
   } catch (error) {
     logError("Pipeline error", error);
     return NextResponse.json(
@@ -72,7 +84,7 @@ export async function POST(req: Request) {
         error: "Analysis failed",
         details: error instanceof Error ? error.message : "Unknown error",
       },
-      { status: 500 }
+      { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
 }

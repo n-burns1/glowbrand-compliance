@@ -35,7 +35,10 @@ export async function POST(req: Request) {
 
     if (!file) {
       console.error("[upload] No file field in form data");
-      return NextResponse.json({ error: "No file provided" }, { status: 400 });
+      return NextResponse.json(
+        { error: "No file provided" },
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
 
     console.log(`[upload] File received: name="${file.name}" type="${file.type}" size=${file.size} bytes (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
@@ -44,14 +47,14 @@ export async function POST(req: Request) {
       console.error(`[upload] Rejected: unsupported type "${file.type}"`);
       return NextResponse.json(
         { error: `Unsupported file type: ${file.type}. Must be mp4, mov, avi, or webm.` },
-        { status: 400 }
+        { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
     if (file.size > MAX_BYTES) {
       console.error(`[upload] Rejected: file too large (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
       return NextResponse.json(
         { error: `File too large (${Math.round(file.size / 1024 / 1024)} MB). Maximum is 500 MB.` },
-        { status: 400 }
+        { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
 
@@ -63,7 +66,7 @@ export async function POST(req: Request) {
       console.error("[upload] Missing Supabase env vars");
       return NextResponse.json(
         { error: "Supabase is not configured. Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local." },
-        { status: 503 }
+        { status: 503, headers: { "Content-Type": "application/json" } }
       );
     }
 
@@ -85,7 +88,7 @@ export async function POST(req: Request) {
       logError("Supabase storage upload failed", uploadError);
       return NextResponse.json(
         { error: `Storage upload failed: ${uploadError.message}` },
-        { status: 500 }
+        { status: 500, headers: { "Content-Type": "application/json" } }
       );
     }
 
@@ -94,12 +97,15 @@ export async function POST(req: Request) {
     const { data: urlData } = supabase.storage.from("videos").getPublicUrl(path);
     console.log(`[upload] Public URL: ${urlData.publicUrl}`);
 
-    return NextResponse.json({ publicUrl: urlData.publicUrl });
+    return NextResponse.json(
+      { publicUrl: urlData.publicUrl },
+      { headers: { "Content-Type": "application/json" } }
+    );
   } catch (err) {
     logError("Unexpected exception", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Upload failed" },
-      { status: 500 }
+      { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
 }
