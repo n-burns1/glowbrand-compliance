@@ -25,6 +25,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { supabase } from "@/lib/supabase";
 import type { Platform, VideoRecord } from "@/lib/types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -210,36 +211,32 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
     setUploadError(null);
 
     try {
-      console.log("[modal] Step 1/2 — uploading file to /api/upload", { name: file.name, size: file.size });
+      console.log("[modal:single] Step 1/2 — uploading directly to Supabase", { name: file.name, size: file.size });
       setUploadPhase("uploading");
-      const fd = new FormData();
-      fd.append("file", file);
-      const uploadRes = await fetch("/api/upload", { method: "POST", body: fd });
-      const uploadData = await uploadRes.json();
-      console.log("[modal] /api/upload response:", { ok: uploadRes.ok, status: uploadRes.status, publicUrl: uploadData.publicUrl, error: uploadData.error });
-
-      if (!uploadRes.ok) {
-        setUploadError(uploadData.error ?? "Upload failed");
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const storagePath = `uploads/${Date.now()}_${safeName}`;
+      const { error: storageError } = await supabase.storage
+        .from("videos")
+        .upload(storagePath, file, { contentType: file.type, upsert: false });
+      if (storageError) {
+        console.error("[modal:single] Supabase upload error:", storageError);
+        setUploadError(`Upload failed: ${storageError.message}`);
         setUploadPhase("idle");
         return;
       }
+      const { data: urlData } = supabase.storage.from("videos").getPublicUrl(storagePath);
+      const publicUrl = urlData.publicUrl;
+      console.log("[modal:single] Supabase upload success, publicUrl:", publicUrl);
 
-      if (!uploadData.publicUrl) {
-        console.error("[modal] Upload succeeded but publicUrl is missing:", uploadData);
-        setUploadError("Upload succeeded but no public URL was returned. Check Supabase bucket is public.");
-        setUploadPhase("idle");
-        return;
-      }
-
-      console.log("[modal] Step 2/2 — sending publicUrl to /api/analyze:", uploadData.publicUrl);
+      console.log("[modal:single] Step 2/2 — sending publicUrl to /api/analyze");
       setUploadPhase("analyzing");
       const analyzeRes = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ videoUrl: uploadData.publicUrl, ...shared }),
+        body: JSON.stringify({ videoUrl: publicUrl, ...shared }),
       });
       const analyzeData = await analyzeRes.json();
-      console.log("[modal] /api/analyze response:", { ok: analyzeRes.ok, status: analyzeRes.status, score: analyzeData.score, error: analyzeData.error });
+      console.log("[modal:single] /api/analyze response:", { ok: analyzeRes.ok, score: analyzeData.score, error: analyzeData.error });
 
       if (!analyzeRes.ok) {
         setUploadError(analyzeData.error ?? "Analysis failed");
@@ -254,7 +251,7 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
       resetAll();
       onClose();
     } catch (err) {
-      console.error("[modal] Upload/analyze error:", err);
+      console.error("[modal:single] Upload/analyze error:", err);
       setUploadError("Unexpected error. Please try again.");
       setUploadPhase("idle");
     }
@@ -339,13 +336,15 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
         setBulkFiles((prev) =>
           prev.map((r) => (r.id === id ? { ...r, status: "uploading" } : r))
         );
-        const fd = new FormData();
-        fd.append("file", f);
-        const uploadRes = await fetch("/api/upload", { method: "POST", body: fd });
-        const uploadData = await uploadRes.json();
-        if (!uploadRes.ok || !uploadData.publicUrl) {
-          throw new Error(uploadData.error ?? "Upload failed");
-        }
+        const safeName = f.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+        const storagePath = `uploads/${Date.now()}_${safeName}`;
+        const { error: storageError } = await supabase.storage
+          .from("videos")
+          .upload(storagePath, f, { contentType: f.type, upsert: false });
+        if (storageError) throw new Error(`Upload failed: ${storageError.message}`);
+        const { data: urlData } = supabase.storage.from("videos").getPublicUrl(storagePath);
+        const publicUrl = urlData.publicUrl;
+        console.log(`[modal:bulk] ${f.name} uploaded → ${publicUrl}`);
 
         setBulkFiles((prev) =>
           prev.map((r) => (r.id === id ? { ...r, status: "analyzing" } : r))
@@ -353,7 +352,7 @@ export function AddVideoModal({ open, onClose, onSuccess }: Props) {
         const analyzeRes = await fetch("/api/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ videoUrl: uploadData.publicUrl, title, handle, platform }),
+          body: JSON.stringify({ videoUrl: publicUrl, title, handle, platform }),
         });
         const analyzeData = await analyzeRes.json();
         if (!analyzeRes.ok) throw new Error(analyzeData.error ?? "Analysis failed");
