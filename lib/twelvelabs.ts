@@ -92,11 +92,17 @@ export async function waitForIndexing(taskId: string): Promise<string> {
   return completed.videoId;
 }
 
-export async function analyzeVideo(videoId: string): Promise<ComplianceReport> {
+// Pegasus 1.5 does not support videoId — pass the video URL directly via the
+// `video` parameter. No pre-indexing step is needed.
+export async function analyzeVideo(videoUrl: string): Promise<ComplianceReport> {
   const results: ComplianceRule[] = [];
 
   for (const rule of COMPLIANCE_RULES) {
-    const response = await client.analyze({ videoId, prompt: rule.prompt });
+    const response = await client.analyze({
+      modelName: "pegasus1.5",
+      video: { type: "url", url: videoUrl },
+      prompt: rule.prompt,
+    });
     const text = (response.data ?? "").trim();
     const passed =
       rule.passOn === null

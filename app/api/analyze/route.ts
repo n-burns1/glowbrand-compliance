@@ -1,10 +1,5 @@
 import { NextResponse } from "next/server";
-import {
-  ensureIndex,
-  uploadVideo,
-  waitForIndexing,
-  analyzeVideo,
-} from "@/lib/twelvelabs";
+import { analyzeVideo } from "@/lib/twelvelabs";
 
 // Allow up to 5 minutes for the full indexing + analysis pipeline
 export const maxDuration = 300;
@@ -53,20 +48,9 @@ export async function POST(req: Request) {
       );
     }
 
-    console.log("[analyze] Step 1/4 — ensureIndex()");
-    const indexId = await ensureIndex();
-    console.log(`[analyze] Index ID: ${indexId}`);
-
-    console.log(`[analyze] Step 2/4 — uploadVideo(indexId="${indexId}", videoUrl="${videoUrl}")`);
-    const taskId = await uploadVideo(indexId, videoUrl);
-    console.log(`[analyze] Task ID: ${taskId}`);
-
-    console.log(`[analyze] Step 3/4 — waitForIndexing(taskId="${taskId}")`);
-    const videoId = await waitForIndexing(taskId);
-    console.log(`[analyze] Video ID: ${videoId}`);
-
-    console.log(`[analyze] Step 4/4 — analyzeVideo(videoId="${videoId}")`);
-    const report = await analyzeVideo(videoId);
+    // Pegasus 1.5 accepts a video URL directly — no index or task pipeline needed.
+    console.log(`[analyze] Analyzing videoUrl="${videoUrl}" with Pegasus 1.5`);
+    const report = await analyzeVideo(videoUrl);
     console.log(`[analyze] Report: score=${report.score} status="${report.status}" rules=${report.rules.length}`);
     report.rules.forEach((r) =>
       console.log(`  rule ${r.id} "${r.name}": passed=${r.passed} | response="${r.response.slice(0, 80)}…"`)
