@@ -54,7 +54,7 @@ let cachedIndexId: string | null = process.env.TWELVELABS_INDEX_ID || null;
 export async function createIndex(): Promise<string> {
   const response = await client.indexes.create({
     indexName: `glowbrand-compliance-${Date.now()}`,
-    models: [{ modelName: "pegasus1.2", modelOptions: ["visual", "audio"] }],
+    models: [{ modelName: "pegasus1.5", modelOptions: ["visual", "audio"] }],
   });
   if (!response.id) throw new Error("Index creation returned no ID");
   return response.id;
